@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
 # Constants
-IRRELEVANT_MODEL_PATH = "models/test_irrelevant_report"
+IRRELEVANT_MODEL_PATH = "models/ModernBERT_irrelevant"
 MULTICLASS_MODEL_PATH = "models/ModernBERT_multiclass"
 
 
