@@ -66,49 +66,26 @@ def compute_metrics(evaluation_prediction):
     }
 
 
-def train_model(
+def train_single_run(
     data_file,
-    model_name_or_path="answerdotai/ModernBERT-base",
-    output_dir=os.path.join(PROJECT_ROOT, "models/ModernBERT_trained"),
+    model_name_or_path,
+    output_dir,
+    epochs,
+    batch_size,
+    learning_rate,
+    X_train,
+    y_train,
+    X_val,
+    y_val,
+    class_weights_tensor,
 ):
-    logger.info(f"Loading data from {data_file}...")
-    try:
-        df = pd.read_csv(data_file)
-    except FileNotFoundError:
-        logger.error(f"File {data_file} not found.")
-        sys.exit(1)
+    """
+    Executes a single training run with specific hyperparameters.
+    """
+    run_name = f"lr{learning_rate}_bs{batch_size}_ep{epochs}"
+    run_output_dir = os.path.join(output_dir, run_name)
 
-    # Preprocessing
-    if "Description" not in df.columns or "irrelevant" not in df.columns:
-        logger.error("CSV must contain 'Description' and 'irrelevant' columns.")
-        sys.exit(1)
-
-    logger.info("Preprocessing data...")
-    # Consultant comments removed in data cleaning step
-
-    df = df[df["Description"].str.len() >= 50]
-    df.reset_index(drop=True, inplace=True)
-
-    logger.info(f"Using {len(df)} samples after filtering.")
-
-    X = df["Description"].tolist()
-    y = df["irrelevant"].tolist()
-
-    # Stratified split
-    X_train, X_val, y_train, y_val = train_test_split(
-        X, y, test_size=0.2, stratify=y, random_state=42
-    )
-
-    # Compute class weights for imbalanced dataset
-    logger.info("Computing class weights...")
-    class_weights = compute_class_weight(
-        class_weight="balanced", classes=np.unique(y_train), y=y_train
-    )
-    class_weights_tensor = torch.tensor(class_weights, dtype=torch.float)
-    logger.info(f"Class weights: {class_weights}")
-
-    # Load Tokenizer & Model
-    logger.info(f"Loading model: {model_name_or_path}...")
+    # Load Tokenizer & Model (Re-load for each run to reset weights)
     try:
         tokenizer = BertTokenizerFast.from_pretrained(model_name_or_path)
         model = BertForSequenceClassification.from_pretrained(
@@ -118,7 +95,6 @@ def train_model(
         logger.warning(
             f"Model '{model_name_or_path}' not found locally. Attempting to download or using default..."
         )
-        # Fallback logic could go here, but transformers usually handles this.
         raise
 
     train_dataset = ReportDataset(X_train, y_train, tokenizer)
@@ -142,17 +118,17 @@ def train_model(
             return (loss, outputs) if return_outputs else loss
 
     training_args = TrainingArguments(
-        output_dir=output_dir,
-        eval_strategy="steps",
-        per_device_train_batch_size=8,
-        per_device_eval_batch_size=8,
-        warmup_steps=100,
-        num_train_epochs=3,
+        output_dir=run_output_dir,
+        eval_strategy="epoch",  # Evaluate every epoch
+        per_device_train_batch_size=batch_size,
+        per_device_eval_batch_size=batch_size,
+        warmup_steps=50 if epochs < 5 else 100,
+        num_train_epochs=epochs,
+        learning_rate=learning_rate,
         weight_decay=0.01,
-        logging_dir=f"{output_dir}/logs",
-        save_strategy="steps",
-        load_best_model_at_end=True,
-        metric_for_best_model="f1_1",  # Assuming checking F1 score of class 1 (irrelevant)
+        logging_dir=f"{run_output_dir}/logs",
+        save_strategy="no",  # Don't save every checkpoint to save space
+        load_best_model_at_end=False,  # We will manually track best across runs
         logging_steps=10,
     )
 
@@ -164,27 +140,143 @@ def train_model(
         compute_metrics=compute_metrics,
     )
 
-    logger.info("Starting training...")
-    start_time = time.time()
+    logger.info(f"Starting training run: {run_name}")
     trainer.train()
 
-    logger.info("Evaluating...")
-    print(trainer.evaluate())
+    logger.info("Evaluating run...")
+    eval_result = trainer.evaluate()
 
-    logger.info(f"Saving model to {output_dir}...")
-    trainer.save_model(output_dir)
-    tokenizer.save_pretrained(output_dir)
+    # cleanup
+    del model
+    torch.cuda.empty_cache()
+
+    return trainer, eval_result, tokenizer, val_dataset
+
+
+def train_model(
+    data_file,
+    model_name_or_path="answerdotai/ModernBERT-base",
+    output_dir=os.path.join(PROJECT_ROOT, "models/ModernBERT_trained"),
+):
+    logger.info(f"Loading data from {data_file}...")
+    try:
+        df = pd.read_csv(data_file)
+    except FileNotFoundError:
+        logger.error(f"File {data_file} not found.")
+        sys.exit(1)
+
+    # Preprocessing
+    if "Description" not in df.columns or "irrelevant" not in df.columns:
+        logger.error("CSV must contain 'Description' and 'irrelevant' columns.")
+        sys.exit(1)
+
+    logger.info("Preprocessing data...")
+    df = df[df["Description"].str.len() >= 50]
+    df.reset_index(drop=True, inplace=True)
+    logger.info(f"Using {len(df)} samples after filtering.")
+
+    X = df["Description"].tolist()
+    y = df["irrelevant"].tolist()
+
+    # Stratified split
+    X_train, X_val, y_train, y_val = train_test_split(
+        X, y, test_size=0.2, stratify=y, random_state=42
+    )
+
+    # Compute class weights
+    logger.info("Computing class weights...")
+    class_weights = compute_class_weight(
+        class_weight="balanced", classes=np.unique(y_train), y=y_train
+    )
+    class_weights_tensor = torch.tensor(class_weights, dtype=torch.float)
+    logger.info(f"Class weights: {class_weights}")
+
+    # --- Hyperparameter Grid ---
+    # Define the possibilities to iterate over
+    # Initial small grid for demonstration/performance
+    learning_rates = [2e-5, 5e-5]
+    batch_sizes = [8, 16]
+    epoch_options = [3]  # Keeping fixed at 3 for now, can be expanded
+
+    results = []
+    best_f1 = -1.0
+    best_run_details = None
+    best_trainer = None
+    best_val_dataset = None
+
+    start_total_time = time.time()
+
+    for lr in learning_rates:
+        for bs in batch_sizes:
+            for ep in epoch_options:
+                logger.info(f"--- Running Grid: LR={lr}, BS={bs}, Epochs={ep} ---")
+
+                trainer, eval_metrics, tokenizer, val_dataset = train_single_run(
+                    data_file,
+                    model_name_or_path,
+                    output_dir,
+                    ep,
+                    bs,
+                    lr,
+                    X_train,
+                    y_train,
+                    X_val,
+                    y_val,
+                    class_weights_tensor,
+                )
+
+                # Extract metric of interest (F1 for class 1 - irrelevant)
+                # Note: compute_metrics returns 'f1_1'
+                current_f1 = eval_metrics.get("eval_f1_1", 0.0)
+
+                run_info = {
+                    "learning_rate": lr,
+                    "batch_size": bs,
+                    "epochs": ep,
+                    "accuracy": eval_metrics.get("eval_accuracy"),
+                    "f1_target": current_f1,
+                    # Add other metrics for the table
+                    "precision_target": eval_metrics.get("eval_precision_1"),
+                    "recall_target": eval_metrics.get("eval_recall_1"),
+                }
+                results.append(run_info)
+
+                if current_f1 > best_f1:
+                    best_f1 = current_f1
+                    best_run_details = run_info
+                    # We need to save this trainer/model as the current best
+                    # Since the trainer is returned, we can reference it.
+                    # HOWEVER, careful with memory. We might just want to save the model to disk now.
+                    best_trainer = trainer  # Keep reference to last best trainer
+                    best_val_dataset = val_dataset
+
+                    logger.info(f"New Best Model Found! F1: {current_f1}")
+
+                    # Save immediately to ensure we have it
+                    logger.info(f"Saving best model to {output_dir}...")
+                    trainer.save_model(output_dir)
+                    tokenizer.save_pretrained(output_dir)
+                else:
+                    # Clear memory if not best
+                    pass
+
+    logger.info(f"Grid Search Complete. Best F1: {best_f1}")
+    logger.info(f"Best Parameters: {best_run_details}")
 
     # Generate HTML Report
     reporter = HTMLTrainingReporter()
-    reporter.generate_report(
-        trainer,
-        val_dataset,
-        report_dir=os.path.join(PROJECT_ROOT, "training_reports"),
-        model_name="Irrelevant_Classifier",
-        class_names=["Relevant", "Irrelevant"],
-        start_time=start_time,
-    )
+    if best_trainer:
+        reporter.generate_report(
+            best_trainer,
+            best_val_dataset,
+            report_dir=os.path.join(PROJECT_ROOT, "training_reports"),
+            model_name="Irrelevant_Classifier",
+            class_names=["Relevant", "Irrelevant"],
+            start_time=start_total_time,
+            run_history=results,
+        )
+    else:
+        logger.error("No model was trained successfully.")
 
 
 if __name__ == "__main__":

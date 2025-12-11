@@ -27,22 +27,65 @@ class HTMLTrainingReporter:
 
     def generate_report(
         self,
-        trainer,
-        val_dataset,
+        best_trainer,
+        best_val_dataset,
         report_dir,
         model_name,
         class_names=None,
         start_time=None,
+        run_history=None,
     ):
         logger.info("Generating HTML training report...")
         os.makedirs(report_dir, exist_ok=True)
 
-        # Collect Metrics
-        log_history = trainer.state.log_history
+        # Calculate total training time for the best run
         training_time = "N/A"
         if start_time:
             elapsed = time.time() - start_time
             training_time = f"{elapsed:.2f} seconds"
+
+        # --- Generate Comparison Table (if run_history provided) ---
+        comparison_html = ""
+        if run_history:
+            comparison_df = pd.DataFrame(run_history)
+            # Reorder columns to put metrics last
+            cols = [
+                c
+                for c in comparison_df.columns
+                if c
+                not in [
+                    "accuracy",
+                    "f1_macro",
+                    "f1_weighted",
+                    "precision_macro",
+                    "recall_macro",
+                ]
+            ]
+            metrics = [
+                c
+                for c in comparison_df.columns
+                if c
+                in [
+                    "accuracy",
+                    "f1_macro",
+                    "f1_weighted",
+                    "precision_macro",
+                    "recall_macro",
+                ]
+            ]
+            comparison_df = comparison_df[cols + metrics]
+
+            # Highlight max values in metrics
+            comparison_html = comparison_df.to_html(
+                classes="table table-striped",
+                index=False,
+                float_format="{:0.4f}".format,
+            )
+
+        # --- Best Model Detailed Analysis ---
+
+        # Collect Metrics for the best model from its history
+        log_history = best_trainer.state.log_history
 
         # Separate Train and Eval metrics
         train_loss = []
@@ -64,13 +107,13 @@ class HTMLTrainingReporter:
         ax.plot(eval_steps, eval_loss, label="Validation Loss", linestyle="--")
         ax.set_xlabel("Steps")
         ax.set_ylabel("Loss")
-        ax.set_title("Training and Validation Loss")
+        ax.set_title("Best Model Training Dynamics")
         ax.legend()
         loss_plot_b64 = self._plot_to_base64(fig)
 
         # Evaluate on Validation Set for Confusion Matrix
-        logger.info("Running evaluation for confusion matrix...")
-        predictions, labels, _ = trainer.predict(val_dataset)
+        logger.info("Running evaluation for confusion matrix on best model...")
+        predictions, labels, _ = best_trainer.predict(best_val_dataset)
         preds = np.argmax(predictions, axis=1)
 
         # Handle class names
@@ -110,7 +153,7 @@ class HTMLTrainingReporter:
 
         ax.set_ylabel("True Label")
         ax.set_xlabel("Predicted Label")
-        ax.set_title("Confusion Matrix")
+        ax.set_title("Confusion Matrix (Best Model)")
         cm_plot_b64 = self._plot_to_base64(fig)
 
         # Classification Report
@@ -122,8 +165,8 @@ class HTMLTrainingReporter:
             classes="table", float_format="{:0.3f}".format
         )
 
-        # Parameters Table
-        args_dict = trainer.args.to_dict()
+        # Parameters Table (Best Model)
+        args_dict = best_trainer.args.to_dict()
         important_args = {
             k: args_dict[k]
             for k in [
@@ -139,38 +182,62 @@ class HTMLTrainingReporter:
 
         # Generate HTML
         current_time_str = time.strftime("%Y-%m-%d %H:%M:%S")
+
+        comparison_section = ""
+        if run_history:
+            comparison_section = f"""
+            <h2>Hyperparameter Tuning Comparison</h2>
+            <p>The following table shows the results of all configurations tested:</p>
+            <div style="overflow-x:auto;">
+                {comparison_html}
+            </div>
+            <br><hr><br>
+            """
+
         html_content = f"""
         <!DOCTYPE html>
         <html>
         <head>
             <title>Training Report - {model_name}</title>
             <style>
-                body {{ font-family: sans-serif; margin: 20px; }}
-                .container {{ max-width: 1200px; margin: auto; }}
-                h1, h2 {{ color: #333; }}
-                .table {{ border-collapse: collapse; width: 100%; margin-bottom: 20px; }}
-                .table th, .table td {{ border: 1px solid #ddd; padding: 8px; }}
-                .table th {{ background-color: #f2f2f2; text-align: left; }}
-                img {{ max-width: 100%; height: auto; border: 1px solid #ddd; margin-bottom: 20px; }}
+                body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 20px; background-color: #f9f9f9; color: #333; }}
+                .container {{ max-width: 1200px; margin: auto; background-color: #fff; padding: 40px; box-shadow: 0 0 10px rgba(0,0,0,0.1); border-radius: 8px; }}
+                h1 {{ color: #2c3e50; border-bottom: 2px solid #eee; padding-bottom: 10px; }}
+                h2 {{ color: #34495e; margin-top: 30px; }}
+                h3 {{ color: #7f8c8d; }}
+                .table {{ border-collapse: collapse; width: 100%; margin-bottom: 20px; font-size: 0.9em; }}
+                .table th, .table td {{ border: 1px solid #ddd; padding: 12px 15px; }}
+                .table th {{ background-color: #f2f2f2; text-align: left; font-weight: 600; color: #555; }}
+                .table-striped tr:nth-child(even) {{ background-color: #f8f8f8; }}
+                .table tr:hover {{ background-color: #f1f1f1; }}
+                img {{ max-width: 100%; height: auto; border: 1px solid #ddd; margin-bottom: 20px; border-radius: 4px; padding: 5px; }}
+                .meta-info {{ background-color: #eef2f3; padding: 15px; border-radius: 5px; margin-bottom: 20px; border-left: 5px solid #3498db; }}
             </style>
         </head>
         <body>
             <div class="container">
                 <h1>Model Training Report: {model_name}</h1>
-                <p><strong>Date:</strong> {current_time_str}</p>
-                <p><strong>Training Time:</strong> {training_time}</p>
                 
-                <h2>Training Parameters</h2>
+                <div class="meta-info">
+                    <p><strong>Date:</strong> {current_time_str}</p>
+                    <p><strong>Training Time (Best Model):</strong> {training_time}</p>
+                </div>
+                
+                {comparison_section}
+
+                <h2>Best Model Analysis</h2>
+                <h3>Selected Parameters</h3>
                 {params_html}
 
-                <h2>Training Dynamics</h2>
+                <h3>Training Dynamics</h3>
                 <img src="data:image/png;base64,{loss_plot_b64}" alt="Loss Plot">
 
-                <h2>Model Performance (Validation Set)</h2>
-                <h3>Confusion Matrix</h3>
+                <h3>Performance on Validation Set</h3>
+                
+                <h4>Confusion Matrix</h4>
                 <img src="data:image/png;base64,{cm_plot_b64}" alt="Confusion Matrix">
                 
-                <h3>Classification Report</h3>
+                <h4>Detailed Classification Report</h4>
                 {clf_report_html}
             </div>
         </body>

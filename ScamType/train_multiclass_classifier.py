@@ -63,6 +63,78 @@ def compute_metrics(evaluation_prediction):
     }
 
 
+def train_single_run(
+    model_name_or_path,
+    output_dir,
+    epochs,
+    batch_size,
+    learning_rate,
+    X_train,
+    y_train,
+    X_val,
+    y_val,
+    unique_labels,
+    id2label,
+    label2id,
+):
+    """
+    Executes a single training run for multiclass classifier.
+    """
+    run_name = f"lr{learning_rate}_bs{batch_size}_ep{epochs}"
+    run_output_dir = os.path.join(output_dir, run_name)
+
+    # Load Tokenizer & Model
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(model_name_or_path)
+        model = AutoModelForSequenceClassification.from_pretrained(
+            model_name_or_path,
+            num_labels=len(unique_labels),
+            id2label=id2label,
+            label2id=label2id,
+        )
+    except Exception as e:
+        logger.error(f"Error loading model: {e}")
+        raise
+
+    train_dataset = ReportDataset(X_train, y_train, tokenizer)
+    val_dataset = ReportDataset(X_val, y_val, tokenizer)
+
+    training_args = TrainingArguments(
+        output_dir=run_output_dir,
+        eval_strategy="epoch",
+        per_device_train_batch_size=batch_size,
+        per_device_eval_batch_size=batch_size,
+        warmup_steps=50,
+        num_train_epochs=epochs,
+        learning_rate=learning_rate,
+        weight_decay=0.01,
+        logging_dir=f"{run_output_dir}/logs",
+        save_strategy="no",  # Save space
+        load_best_model_at_end=False,
+        logging_steps=10,
+    )
+
+    trainer = Trainer(
+        model=model,
+        args=training_args,
+        train_dataset=train_dataset,
+        eval_dataset=val_dataset,
+        compute_metrics=compute_metrics,
+    )
+
+    logger.info(f"Starting training run: {run_name}")
+    trainer.train()
+
+    logger.info("Evaluating run...")
+    eval_result = trainer.evaluate()
+
+    # cleanup
+    del model
+    torch.cuda.empty_cache()
+
+    return trainer, eval_result, tokenizer, val_dataset
+
+
 def train_model(
     data_file,
     taxonomy_file=os.path.join(PROJECT_ROOT, "taxonomy_mapping.csv"),
@@ -107,11 +179,7 @@ def train_model(
     logger.info(f"Filtered {original_len} -> {len(df)} rows.")
 
     logger.info("Preprocessing text...")
-    # Consultant comments removed in data cleaning step
-
-    df = df[
-        df["Description"].str.len() >= 10
-    ]  # Reduced limit, 50 might be too high for small test data
+    df = df[df["Description"].str.len() >= 10]
     df.reset_index(drop=True, inplace=True)
 
     # Map Labels
@@ -126,7 +194,6 @@ def train_model(
     y = df["label"].tolist()
 
     # Stratified split
-    # Handle cases where some classes might have < 2 samples
     try:
         X_train, X_val, y_train, y_val = train_test_split(
             X, y, test_size=0.2, stratify=y, random_state=42
@@ -139,72 +206,91 @@ def train_model(
             X, y, test_size=0.2, random_state=42
         )
 
-    # Load Tokenizer & Model
-    logger.info(f"Loading model: {model_name_or_path}...")
-    try:
-        tokenizer = AutoTokenizer.from_pretrained(model_name_or_path)
-        model = AutoModelForSequenceClassification.from_pretrained(
-            model_name_or_path,
-            num_labels=len(unique_labels),
-            id2label=id2label,
-            label2id=label2id,
-        )
-    except Exception as e:
-        logger.error(f"Error loading model: {e}")
-        raise
+    # --- Hyperparameter Grid ---
+    learning_rates = [2e-5, 5e-5]
+    batch_sizes = [8, 16]
+    epoch_options = [
+        5
+    ]  # keeping it fixed at 5 as per original request, but can be grid searched
 
-    train_dataset = ReportDataset(X_train, y_train, tokenizer)
-    val_dataset = ReportDataset(X_val, y_val, tokenizer)
+    results = []
+    best_f1 = -1.0
+    best_run_details = None
+    best_trainer = None
+    best_val_dataset = None
 
-    training_args = TrainingArguments(
-        output_dir=output_dir,
-        eval_strategy="epoch",
-        per_device_train_batch_size=8,
-        per_device_eval_batch_size=8,
-        warmup_steps=50,  # Reduced warmup for potentially small data
-        num_train_epochs=5,  # Increased epochs
-        weight_decay=0.01,
-        logging_dir=f"{output_dir}/logs",
-        save_strategy="epoch",
-        load_best_model_at_end=True,
-        metric_for_best_model="f1",
-        logging_steps=10,
-        save_total_limit=2,
-    )
+    start_total_time = time.time()
 
-    trainer = Trainer(
-        model=model,
-        args=training_args,
-        train_dataset=train_dataset,
-        eval_dataset=val_dataset,
-        compute_metrics=compute_metrics,
-    )
+    for lr in learning_rates:
+        for bs in batch_sizes:
+            for ep in epoch_options:
+                logger.info(f"--- Running Grid: LR={lr}, BS={bs}, Epochs={ep} ---")
 
-    logger.info("Starting training...")
-    start_time = time.time()
-    trainer.train()
+                trainer, eval_metrics, tokenizer, val_dataset = train_single_run(
+                    model_name_or_path,
+                    output_dir,
+                    ep,
+                    bs,
+                    lr,
+                    X_train,
+                    y_train,
+                    X_val,
+                    y_val,
+                    unique_labels,
+                    id2label,
+                    label2id,
+                )
 
-    logger.info("Evaluating...")
-    print(trainer.evaluate())
+                # Extract metric: Weighted F1
+                current_f1 = eval_metrics.get("eval_f1", 0.0)
 
-    logger.info(f"Saving model to {output_dir}...")
-    trainer.save_model(output_dir)
-    tokenizer.save_pretrained(output_dir)
+                run_info = {
+                    "learning_rate": lr,
+                    "batch_size": bs,
+                    "epochs": ep,
+                    "accuracy": eval_metrics.get("eval_accuracy"),
+                    "f1_weighted": current_f1,
+                    "loss": eval_metrics.get("eval_loss"),
+                }
+                results.append(run_info)
 
-    # Save label mapping explicitly as json for portability (optional, as config has it)
+                if current_f1 > best_f1:
+                    best_f1 = current_f1
+                    best_run_details = run_info
+                    best_trainer = trainer
+                    best_val_dataset = val_dataset
+
+                    logger.info(f"New Best Model Found! Weighted F1: {current_f1}")
+
+                    # Save immediately
+                    logger.info(f"Saving best model to {output_dir}...")
+                    trainer.save_model(output_dir)
+                    tokenizer.save_pretrained(output_dir)
+                else:
+                    pass
+
+    logger.info(f"Grid Search Complete. Best Weighted F1: {best_f1}")
+    logger.info(f"Best Parameters: {best_run_details}")
+
+    # Save label mapping explicitly as json for portability
+    # We do this at the end, ensuring it matches the model we saved
     with open(os.path.join(output_dir, "label_map.json"), "w") as f:
         json.dump(label2id, f, indent=4)
 
     # Generate HTML Report
     reporter = HTMLTrainingReporter()
-    reporter.generate_report(
-        trainer,
-        val_dataset,
-        report_dir=os.path.join(PROJECT_ROOT, "training_reports"),
-        model_name="Multiclass_Classifier",
-        class_names=id2label,
-        start_time=start_time,
-    )
+    if best_trainer:
+        reporter.generate_report(
+            best_trainer,
+            best_val_dataset,
+            report_dir=os.path.join(PROJECT_ROOT, "training_reports"),
+            model_name="Multiclass_Classifier",
+            class_names=id2label,
+            start_time=start_total_time,
+            run_history=results,
+        )
+    else:
+        logger.error("No model was trained successfully.")
 
 
 if __name__ == "__main__":
