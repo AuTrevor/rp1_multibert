@@ -1,0 +1,6 @@
+Description,Predicted Category,Confidence
+This is a short desc.,Could not classify,0.0
+Thïs hås nøn-åscii chåråcters so it should fail the English check.,Could not classify,0.0
+This is a perfectly valid description that is long enough to pass the quality check but should be irrelevant I hope. This is just a complaint about service.,Jobs and Employment Scams,0.43021151423454285
+I received an email from a prince in Nigeria asking for my bank details to transfer $10 million USD. He needs a small fee first.,Account or Identity Takeover Scams,0.46696406602859497
+My computer has a virus and tech support called me to pay $500 in gift cards to fix it immediately.,Payment Redirection/ Business Email Compromise Scams,0.36637747287750244
