@@ -8,7 +8,7 @@ import torch
 from transformers import (
     AutoTokenizer,
     AutoModelForSequenceClassification,
-    AutoModelForVision2Seq,
+    AutoModelForImageTextToText,
 )
 import logging
 import sys
@@ -28,27 +28,50 @@ IRRELEVANT_MODEL_PATH = "models/ModernBERT_irrelevant"
 MULTICLASS_MODEL_PATH = "models/ModernBERT_multiclass"
 THRESHOLD = 0.8
 QWEN_MODEL_ID = "Qwen/Qwen3-VL-8B-Instruct"
+QWEN_MODEL_PATH = "models/Qwen_Qwen3-VL-8B-Instruct"
 
 
-def load_qwen_model() -> Tuple[AutoModelForVision2Seq, AutoTokenizer, torch.device]:
+def load_qwen_model() -> (
+    Tuple[AutoModelForImageTextToText, AutoTokenizer, torch.device]
+):
     """Loads the Qwen model and tokenizer."""
     try:
+        # Check if local model exists
+        if os.path.exists(QWEN_MODEL_PATH):
+            logger.info(f"Loading Qwen model from local path: {QWEN_MODEL_PATH}")
+            load_path = QWEN_MODEL_PATH
+        else:
+            logger.info(
+                f"Local model not found at {QWEN_MODEL_PATH}. Downloading from Hub: {QWEN_MODEL_ID}"
+            )
+            load_path = QWEN_MODEL_ID
+
         # Load tokenizer and model
-        tokenizer = AutoTokenizer.from_pretrained(QWEN_MODEL_ID, trust_remote_code=True)
-        model = AutoModelForVision2Seq.from_pretrained(
-            QWEN_MODEL_ID, device_map="auto", trust_remote_code=True, torch_dtype="auto"
+        tokenizer = AutoTokenizer.from_pretrained(load_path, trust_remote_code=True)
+        model = AutoModelForImageTextToText.from_pretrained(
+            load_path, device_map="auto", trust_remote_code=True, torch_dtype="auto"
         )
+
+        # If we downloaded from Hub, save to local path for future use
+        if load_path == QWEN_MODEL_ID:
+            logger.info(f"Saving Qwen model to local path: {QWEN_MODEL_PATH}")
+            tokenizer.save_pretrained(QWEN_MODEL_PATH)
+            model.save_pretrained(QWEN_MODEL_PATH)
+
         # device_map="auto" usually handles moving to GPU/CPU, but for consistency with other funcs we can return device
         # If device_map is used, model.device is set.
         device = model.device
         return model, tokenizer, device
     except Exception as e:
-        logger.error(f"Failed to load Qwen model from {QWEN_MODEL_ID}: {e}")
+        logger.error(f"Failed to load Qwen model: {e}")
         raise e
 
 
 def clarify_and_summarize(
-    description: str, model: AutoModelForVision2Seq, tokenizer: AutoTokenizer, device
+    description: str,
+    model: AutoModelForImageTextToText,
+    tokenizer: AutoTokenizer,
+    device,
 ) -> str:
     """
     Uses Qwen to clarify and summarize the description.
