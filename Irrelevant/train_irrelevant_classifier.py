@@ -157,6 +157,9 @@ def train_model(
     data_file,
     model_name_or_path="answerdotai/ModernBERT-base",
     output_dir=os.path.join(PROJECT_ROOT, "models/ModernBERT_trained"),
+    epochs=None,
+    batch_size=None,
+    learning_rate=None,
 ):
     logger.info(f"Loading data from {data_file}...")
     try:
@@ -192,11 +195,20 @@ def train_model(
     logger.info(f"Class weights: {class_weights}")
 
     # --- Hyperparameter Grid ---
-    # Define the possibilities to iterate over
-    # Initial small grid for demonstration/performance
-    learning_rates = [2e-5, 5e-5]
-    batch_sizes = [8, 16]
-    epoch_options = [3]  # Keeping fixed at 3 for now, can be expanded
+    if epochs:
+        epoch_options = [epochs]
+    else:
+        epoch_options = [3]  # Default grid
+
+    if batch_size:
+        batch_sizes = [batch_size]
+    else:
+        batch_sizes = [8, 16]
+
+    if learning_rate:
+        learning_rates = [learning_rate]
+    else:
+        learning_rates = [2e-5, 5e-5]
 
     results = []
     best_f1 = -1.0
@@ -294,7 +306,32 @@ if __name__ == "__main__":
         default=os.path.join(PROJECT_ROOT, "models/ModernBERT_trained"),
         help="Output directory for saved model",
     )
+    parser.add_argument(
+        "--epochs",
+        type=int,
+        default=None,
+        help="Number of training epochs (overrides grid)",
+    )
+    parser.add_argument(
+        "--batch_size",
+        type=int,
+        default=None,
+        help="Training batch size (overrides grid)",
+    )
+    parser.add_argument(
+        "--learning_rate",
+        type=float,
+        default=None,
+        help="Learning rate (overrides grid)",
+    )
 
     args = parser.parse_args()
 
-    train_model(args.data_file, args.model_name, args.output_dir)
+    train_model(
+        args.data_file,
+        args.model_name,
+        args.output_dir,
+        args.epochs,
+        args.batch_size,
+        args.learning_rate,
+    )

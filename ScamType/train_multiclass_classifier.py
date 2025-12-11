@@ -140,6 +140,9 @@ def train_model(
     taxonomy_file=os.path.join(PROJECT_ROOT, "taxonomy_mapping.csv"),
     model_name_or_path="answerdotai/ModernBERT-base",
     output_dir=os.path.join(PROJECT_ROOT, "models/ModernBERT_multiclass"),
+    epochs=None,
+    batch_size=None,
+    learning_rate=None,
 ):
     # 1. Load Taxonomy to build Label Mapping
     logger.info(f"Loading taxonomy from {taxonomy_file}...")
@@ -207,11 +210,20 @@ def train_model(
         )
 
     # --- Hyperparameter Grid ---
-    learning_rates = [2e-5, 5e-5]
-    batch_sizes = [8, 16]
-    epoch_options = [
-        5
-    ]  # keeping it fixed at 5 as per original request, but can be grid searched
+    if epochs:
+        epoch_options = [epochs]
+    else:
+        epoch_options = [5]
+
+    if batch_size:
+        batch_sizes = [batch_size]
+    else:
+        batch_sizes = [8, 16]
+
+    if learning_rate:
+        learning_rates = [learning_rate]
+    else:
+        learning_rates = [2e-5, 5e-5]
 
     results = []
     best_f1 = -1.0
@@ -313,7 +325,33 @@ if __name__ == "__main__":
         default=os.path.join(PROJECT_ROOT, "taxonomy_mapping.csv"),
         help="Path to taxonomy mapping file",
     )
+    parser.add_argument(
+        "--epochs",
+        type=int,
+        default=None,
+        help="Number of training epochs (overrides grid)",
+    )
+    parser.add_argument(
+        "--batch_size",
+        type=int,
+        default=None,
+        help="Training batch size (overrides grid)",
+    )
+    parser.add_argument(
+        "--learning_rate",
+        type=float,
+        default=None,
+        help="Learning rate (overrides grid)",
+    )
 
     args = parser.parse_args()
 
-    train_model(args.data_file, args.taxonomy_file, args.model_name, args.output_dir)
+    train_model(
+        args.data_file,
+        args.taxonomy_file,
+        args.model_name,
+        args.output_dir,
+        args.epochs,
+        args.batch_size,
+        args.learning_rate,
+    )
