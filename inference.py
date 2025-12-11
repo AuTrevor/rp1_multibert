@@ -1,9 +1,17 @@
+import os
+
+# Set environment variable to suppress tokenizers warning and avoid deadlocks
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
 import pandas as pd
 import torch
-from transformers import AutoTokenizer, AutoModelForSequenceClassification
+from transformers import (
+    AutoTokenizer,
+    AutoModelForSequenceClassification,
+    AutoModelForVision2Seq,
+)
 import logging
 import sys
-import os
 from typing import Tuple
 
 # Setup logging
@@ -18,6 +26,60 @@ logger.setLevel(logging.INFO)
 # Constants
 IRRELEVANT_MODEL_PATH = "models/ModernBERT_irrelevant"
 MULTICLASS_MODEL_PATH = "models/ModernBERT_multiclass"
+THRESHOLD = 0.8
+QWEN_MODEL_ID = "Qwen/Qwen3-VL-8B-Instruct"
+
+
+def load_qwen_model() -> Tuple[AutoModelForVision2Seq, AutoTokenizer, torch.device]:
+    """Loads the Qwen model and tokenizer."""
+    try:
+        # Load tokenizer and model
+        tokenizer = AutoTokenizer.from_pretrained(QWEN_MODEL_ID, trust_remote_code=True)
+        model = AutoModelForVision2Seq.from_pretrained(
+            QWEN_MODEL_ID, device_map="auto", trust_remote_code=True, torch_dtype="auto"
+        )
+        # device_map="auto" usually handles moving to GPU/CPU, but for consistency with other funcs we can return device
+        # If device_map is used, model.device is set.
+        device = model.device
+        return model, tokenizer, device
+    except Exception as e:
+        logger.error(f"Failed to load Qwen model from {QWEN_MODEL_ID}: {e}")
+        raise e
+
+
+def clarify_and_summarize(
+    description: str, model: AutoModelForVision2Seq, tokenizer: AutoTokenizer, device
+) -> str:
+    """
+    Uses Qwen to clarify and summarize the description.
+    """
+    prompt = (
+        f"Please clarify and summarize the following description text to make it clearer for classification. "
+        f"Keep the summary concise and focused on the key details relevant to identifying what is happening.\n\n"
+        f"Description: {description}\n\nSummary:"
+    )
+
+    inputs = tokenizer(prompt, return_tensors="pt").to(device)
+
+    with torch.no_grad():
+        generated_ids = model.generate(
+            **inputs, max_new_tokens=150, do_sample=True, temperature=0.7
+        )
+
+    # helper to clean up output, removing the prompt
+    generated_text = tokenizer.decode(generated_ids[0], skip_special_tokens=True)
+
+    # Simple parsing to get just the new text if model repeats prompt (it usually doesn't if instructed well, but casual LMs might)
+    # The 'Summary:' part might be in the output if it continued generation.
+    # Qwen-Instruct models are usually good at following.
+    # For now, we'll return the text after the prompt length or simply the whole new text if distinct.
+    # Let's just return the generated part.
+    # tokenizer.decode excludes input tokens usually if we handle `generated_ids` slicing,
+    # but `model.generate` returns input+output by default.
+    new_tokens = generated_ids[0][inputs.input_ids.shape[1] :]
+    summary = tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
+
+    return summary
 
 
 def perform_data_quality_checks(description: str) -> bool:
@@ -120,6 +182,11 @@ def inference_pipeline(df: pd.DataFrame) -> pd.DataFrame:
 
     processed_count = 0
 
+    # Initialize Qwen variables (lazy loading)
+    qwen_model = None
+    qwen_tokenizer = None
+    qwen_device = None
+
     # We will process row by row for simplicity given the complex conditional logic,
     # but for high throughput, we should batch.
     # Given the prompt implies "returns ... for each incoming description",
@@ -146,11 +213,6 @@ def inference_pipeline(df: pd.DataFrame) -> pd.DataFrame:
         )[0]
 
         # Logic: If classification is 1 (Irrelevant/Not Scam)
-        # Note: We need to verify if label '1' corresponds to "not scam" or "irrelevant".
-        # Based on previous context (clean_functional_test_data.csv), 'irrelevant' column has 0s and 1s.
-        # Usually 1 means "is irrelevant" (i.e. Not a Scam) and 0 means "is relevant" (i.e. Is a Scam).
-        # Let's assume prediction '1' -> Irrelevant.
-
         if irr_pred == 1:
             results.append(
                 {
@@ -166,13 +228,53 @@ def inference_pipeline(df: pd.DataFrame) -> pd.DataFrame:
             [description], multi_model, multi_tokenizer, multi_device, multi_id2label
         )[0]
 
-        results.append(
-            {
-                "Description": description,
-                "Predicted Category": multi_pred,
-                "Confidence": multi_conf,
-            }
-        )
+        # Step 4: Fallback if low confidence
+        if multi_conf < THRESHOLD:
+            logger.info(
+                f"Low confidence ({multi_conf:.4f} < {THRESHOLD}). Initiating Qwen fallback."
+            )
+
+            # Load Qwen if not already loaded
+            if qwen_model is None:
+                logger.info("Loading Qwen model for fallback...")
+                qwen_model, qwen_tokenizer, qwen_device = load_qwen_model()
+
+            # Clarify and summarize
+            summary = clarify_and_summarize(
+                description, qwen_model, qwen_tokenizer, qwen_device
+            )
+            logger.info(f"Generated summary for re-classification.")
+
+            # Step 6: Re-classify (same process as step 3 but on summary)
+            new_pred, new_conf = predict_batch(
+                [summary], multi_model, multi_tokenizer, multi_device, multi_id2label
+            )[0]
+
+            if new_conf < THRESHOLD:
+                results.append(
+                    {
+                        "Description": description,
+                        "Predicted Category": "Unable to classify",
+                        "Confidence": new_conf,  # Reporting the new confidence even if failed
+                    }
+                )
+            else:
+                results.append(
+                    {
+                        "Description": description,
+                        "Predicted Category": new_pred,
+                        "Confidence": new_conf,
+                    }
+                )
+
+        else:
+            results.append(
+                {
+                    "Description": description,
+                    "Predicted Category": multi_pred,
+                    "Confidence": multi_conf,
+                }
+            )
 
         processed_count += 1
         if processed_count % 10 == 0:
