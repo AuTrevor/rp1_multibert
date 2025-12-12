@@ -99,6 +99,36 @@ def clean_data(input_file, output_file):
         f"Rows remaining after English filter: {count_after_english} (Dropped {count_after_len - count_after_english})"
     )
 
+    # Map categories
+    logger.info("Mapping categories using taxonomy_mapping.csv...")
+    try:
+        mapping_df = pd.read_csv("taxonomy_mapping.csv")
+        # Ensure 'Category' column exists in df
+        if "Category" in df.columns:
+            # Merge with mapping dataframe
+            merged_df = df.merge(
+                mapping_df,
+                left_on="Category",
+                right_on="old_Scam_category",
+                how="left",
+            )
+
+            # Log missing mappings
+            missing_count = merged_df["new_scam_category"].isna().sum()
+            logger.info(f"Records with missing mappings: {missing_count}")
+
+            # Update Category with new_scam_category where available, keep original otherwise
+            df["Category"] = merged_df["new_scam_category"].fillna(df["Category"])
+        else:
+            logger.warning(
+                "Column 'Category' not found in input file. Skipping mapping."
+            )
+
+    except FileNotFoundError:
+        logger.error("taxonomy_mapping.csv not found. Skipping category mapping.")
+    except Exception as e:
+        logger.error(f"Failed to map categories: {e}")
+
     # Save to output
     logger.info(f"Saving cleaned data to {output_file}...")
     df.to_csv(output_file, index=False)
