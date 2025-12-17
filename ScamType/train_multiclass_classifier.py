@@ -137,31 +137,13 @@ def train_single_run(
 
 def train_model(
     data_file,
-    taxonomy_file=os.path.join(PROJECT_ROOT, "taxonomy_mapping.csv"),
     model_name_or_path="answerdotai/ModernBERT-base",
     output_dir=os.path.join(PROJECT_ROOT, "models/ModernBERT_multiclass"),
     epochs=None,
     batch_size=None,
     learning_rate=None,
 ):
-    # 1. Load Taxonomy to build Label Mapping
-    logger.info(f"Loading taxonomy from {taxonomy_file}...")
-    if not os.path.exists(taxonomy_file):
-        logger.error(f"Taxonomy file {taxonomy_file} not found.")
-        sys.exit(1)
-
-    df_taxonomy = pd.read_csv(taxonomy_file)
-    if "New_Scam_Category" not in df_taxonomy.columns:
-        logger.error(f"Column 'New_Scam_Category' not found in {taxonomy_file}")
-        sys.exit(1)
-
-    unique_labels = sorted(df_taxonomy["New_Scam_Category"].dropna().unique().tolist())
-    label2id = {label: i for i, label in enumerate(unique_labels)}
-    id2label = {i: label for label, i in label2id.items()}
-
-    logger.info(f"Found {len(unique_labels)} unique categories.")
-
-    # 2. Load Data
+    # 1. Load Data
     logger.info(f"Loading training data from {data_file}...")
     if not os.path.exists(data_file):
         logger.error(f"Data file {data_file} not found.")
@@ -181,12 +163,20 @@ def train_model(
     df = df[df["irrelevant"] == 0].copy()
     logger.info(f"Filtered {original_len} -> {len(df)} rows.")
 
+    df = df.dropna(subset=["Category"])
+    unique_labels = sorted(df["Category"].unique().tolist())
+    label2id = {label: i for i, label in enumerate(unique_labels)}
+    id2label = {i: label for label, i in label2id.items()}
+
+    logger.info(f"Found {len(unique_labels)} unique categories.")
+
     logger.info("Preprocessing text...")
     df = df[df["Description"].str.len() >= 10]
     df.reset_index(drop=True, inplace=True)
 
     # Map Labels
-    df = df[df["Category"].isin(unique_labels)]  # Ensure valid labels
+    # Map Labels
+    # df = df[df["Category"].isin(unique_labels)]  # Ensure valid labels (Implicit now)
     df["label"] = df["Category"].map(label2id)
 
     if len(df) == 0:
@@ -320,11 +310,7 @@ if __name__ == "__main__":
         default=os.path.join(PROJECT_ROOT, "models/ModernBERT_multiclass"),
         help="Output directory for saved model",
     )
-    parser.add_argument(
-        "--taxonomy_file",
-        default=os.path.join(PROJECT_ROOT, "taxonomy_mapping.csv"),
-        help="Path to taxonomy mapping file",
-    )
+
     parser.add_argument(
         "--epochs",
         type=int,
@@ -348,7 +334,6 @@ if __name__ == "__main__":
 
     train_model(
         args.data_file,
-        args.taxonomy_file,
         args.model_name,
         args.output_dir,
         args.epochs,
